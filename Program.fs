@@ -69,7 +69,7 @@ module Domain =
         | FlavourSold of Flavour
         | FlavourRestocked of Flavour * int
         | FlavourWentOutOfStock of Flavour
-        | FlavorWasNotInStock of Flavour
+        | FlavourWasNotInStock of Flavour
 
 
 module Projections =
@@ -107,8 +107,8 @@ module Projections =
     let restock flavour number stock =
         stock
         |> Map.tryFind flavour
-        |> Option.map (fun portions -> stock |> Map.add flavour (portions + number))
-        |> Option.defaultValue stock
+        |> Option.defaultValue 0
+        |> fun portions -> stock |> Map.add flavour (portions + number)
 
     let updateFlavoursInSotck stock event =
         match event with
@@ -143,15 +143,79 @@ module Behaviour =
             |> stockOf flavour
         // verifique constraints para FlavourSold
         match stock with
-        | 0 -> [FlavorWasNotInStock flavour]
+        | 0 -> [FlavourWasNotInStock flavour]
         | 1 -> [FlavourSold flavour; FlavourWentOutOfStock flavour]
         | _ -> [FlavourSold flavour]
 
     let restock flavour number (events : Event list) =
         [FlavourRestocked (flavour, number)]
 
+module Tests =
+    open Expecto
+    open Expecto.Expect
+    open Domain
+
+    // Given events
+    // When action
+    // Then events
+
+    let Given = id
+
+    let When eventProducer events =
+        eventProducer events
+
+    let Then expectedEvents actualEvents =
+        equal actualEvents expectedEvents "novos eventos devem ser igual ao eventos esperados"
+
+    let tests = 
+        testList "SellFlavour"
+            [
+                test "FlavourSold caminho feliz" {
+                    Given 
+                        [
+                            FlavourRestocked (Vanilla, 3)
+                        ]
+                    |> When (Behaviour.sellFlavour Vanilla)
+                    |> Then 
+                            [
+                                FlavourSold Vanilla
+                            ]
+                }
+
+                test "FlavourSold, FlavourWentOutoOfStock" {
+                    Given 
+                        [
+                            FlavourRestocked (Vanilla, 3)
+                            FlavourSold Vanilla
+                            FlavourSold Vanilla
+                        ]
+                    |> When (Behaviour.sellFlavour Vanilla)
+                    |> Then 
+                        [
+                            FlavourSold Vanilla
+                            FlavourWentOutOfStock Vanilla
+                        ]
+                }
+
+                test "FlavourWasNotInStock" {
+                    Given 
+                        [
+                            FlavourRestocked (Vanilla, 3)
+                            FlavourSold Vanilla
+                            FlavourSold Vanilla
+                            FlavourSold Vanilla
+                        ]
+                    |> When (Behaviour.sellFlavour Vanilla)
+                    |> Then 
+                        [
+                            FlavourWasNotInStock Vanilla
+                        ]                        
+                }                
+            ]       
+
 module Helper =
     open Projections
+    open Expecto
 
     let printUl list =
         list
@@ -173,6 +237,9 @@ module Helper =
         state
         |> stockOf flavour
         |> printfn "Stock %A: %i" flavour
+  
+    let runTests () =
+        runTests defaultConfig Tests.tests |> ignore 
 
 open EventStore
 open Domain
@@ -181,6 +248,8 @@ open Projections
 
 [<EntryPoint>]
 let main _ =
+    runTests ()
+
     let eventStore : EventStore<Event> = initialize()
 
     eventStore.Evolve (Behaviour.sellFlavour Vanilla)
