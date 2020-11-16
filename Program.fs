@@ -2,18 +2,27 @@
     type EventProducer<'Event> =
         'Event list -> 'Event list
 
+    type Aggregate = System.Guid
+
     type EventStore<'Event> =
         {
-            Get : unit -> 'Event list
-            Append : 'Event list -> unit
-            Evolve : EventProducer<'Event> -> unit
+            Get : unit -> Map<Aggregate, 'Event list>
+            GetStream : Aggregate -> 'Event list
+            Append : Aggregate -> 'Event list -> unit
+            Evolve : Aggregate -> EventProducer<'Event> -> unit
         }
 
     // operações que o MailBox pode processar
     type Msg<'Event> =
-        | Append of 'Event list
-        | Get of AsyncReplyChannel<'Event list> // que tipo de resposta esperamos
-        | Evolve of EventProducer<'Event>
+        | Append of Aggregate * 'Event list
+        | GetStream of Aggregate * AsyncReplyChannel<'Event list>
+        | Get of AsyncReplyChannel<Map<Aggregate, 'Event list>> // que tipo de resposta esperamos
+        | Evolve of Aggregate * EventProducer<'Event>
+
+    let eventsforAggregate aggregate history =
+        history
+        |> Map.tryFind aggregate
+        |> Option.defaultValue []
 
     let initialize () : EventStore<'Event> =
         let agent =
@@ -24,9 +33,15 @@
                         let! msg = inbox.Receive()
 
                         match msg with 
-                        | Append events ->
+                        | Append (aggregate,  events) ->
+                            let streamEvents = history |> eventsforAggregate aggregate
+
+                            let newState =
+                                history
+                                |> Map.add aggregate (streamEvents @ events)
+
                             // chama a função recursiva para manter o agente escutando
-                            return! loop (history @ events)
+                            return! loop newState
                         
                         | Get reply -> 
                             // responde no canal determinado
@@ -35,29 +50,45 @@
                             // chama a função recursiva para manter o agente escutando
                             return! loop history
 
-                        | Evolve eventProducer ->
-                            let newEvents =
-                                eventProducer history
+                        | GetStream (aggregate, reply) ->
+                            reply.Reply (history |> eventsforAggregate aggregate)
 
-                            return! loop(history @ newEvents)
+                            return! loop history
+
+                        | Evolve (aggregate, eventProducer) ->
+                            let streamEvents = 
+                                history |> eventsforAggregate aggregate
+
+                            let newEvents =
+                                eventProducer streamEvents
+
+                            let newHistory =
+                                history
+                                |> Map.add aggregate (streamEvents @ newEvents)                                
+
+                            return! loop newHistory
                     }
 
-                loop []
+                loop Map.empty
             )
     
-        let append events =
-            agent.Post (Append events)
+        let append aggregate events =
+            agent.Post (Append (aggregate, events))
 
         let get () =
             agent.PostAndReply Get
 
-        let evolve eventProducer =     
-            agent.Post (Evolve eventProducer)
+        let evolve aggregate eventProducer =     
+            agent.Post (Evolve (aggregate, eventProducer))
+
+        let getStream aggregate = 
+            agent.PostAndReply (fun reply -> GetStream (aggregate, reply))
 
         {
             Get = get
             Append = append
             Evolve = evolve
+            GetStream = getStream
         }
 
 module Domain =
@@ -221,10 +252,10 @@ module Helper =
         list
         |> List.iteri (fun i item -> printfn " %i: %A" (i+1) item)
 
-    let printEvents events =
+    let printEvents header events =
         events 
         |> List.length
-        |> printfn "History (Length: %i)"
+        |> printfn "History for %s (Length: %i)" header
 
         events |> printUl    
 
@@ -250,17 +281,23 @@ open Projections
 let main _ =
     runTests ()
 
+    let truck1 = System.Guid.NewGuid()
+    let truck2 = System.Guid.NewGuid()
+
     let eventStore : EventStore<Event> = initialize()
 
-    eventStore.Evolve (Behaviour.sellFlavour Vanilla)
-    eventStore.Evolve (Behaviour.sellFlavour Strawberry)
+    eventStore.Evolve truck1 (Behaviour.sellFlavour Vanilla)
+    eventStore.Evolve truck1 (Behaviour.sellFlavour Strawberry)
+    eventStore.Evolve truck1 (Behaviour.restock Vanilla 3)
+    eventStore.Evolve truck1 (Behaviour.sellFlavour Vanilla)
 
-    eventStore.Evolve (Behaviour.restock Vanilla 3)
-    eventStore.Evolve (Behaviour.sellFlavour Vanilla)
+    eventStore.Evolve truck2 (Behaviour.sellFlavour Vanilla)
 
-    let events = eventStore.Get() 
+    let eventsTruck1 = eventStore.GetStream truck1 
+    let eventsTruck2 = eventStore.GetStream truck2
     
-    events |> printEvents
+    eventsTruck1 |> printEvents " Truck1"
+    eventsTruck2 |> printEvents " Truck2"
 
     (*
         Map {
@@ -270,14 +307,14 @@ let main _ =
     *)
 
     let sold : Map<Flavour, int> =
-        events
+        eventsTruck1
         |> project soldFlavours
 
     printSoldFlavour Vanilla sold
     printSoldFlavour Strawberry sold
 
     let stock =
-        events |> project  flavoursInStock
+        eventsTruck1 |> project  flavoursInStock
 
     printStockOfFlavour Vanilla stock        
 
